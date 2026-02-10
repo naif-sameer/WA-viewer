@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#111b21">
+    <title>Obsidian</title>
+    <link rel="stylesheet" href="./style.css">
+    <script src="./script.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+</head>
+<body class="dark-theme">
+
+    <div id="loader">
+        <div class="loader-content">
+            <i class="ph-fill ph-whatsapp-logo" style="font-size: 64px; color: #00a884;"></i>
+            <div class="progress-bar"><div class="fill"></div></div>
+            <p><i class="ph-fill ph-lock-key"></i> End-to-end encrypted</p>
+        </div>
+    </div>
+
+    <div class="app-layout">
+        
+        <aside class="sidebar" id="sidebar">
+            <header class="sidebar-header">
+                <div class="profile-thumb" onclick="openDrawer('profile')" title="My Profile">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png" id="my-pfp-img" alt="Me">
+                </div>
+                <div class="sidebar-nav">
+                    <button onclick="openDrawer('stats')" title="Analytics"><i class="ph ph-chart-pie-slice"></i></button>
+                    <button onclick="openDrawer('info')" title="App Info"><i class="ph ph-info"></i></button>
+                    <button onclick="toggleTheme()" title="Toggle Theme"><i class="ph ph-moon-stars"></i></button>
+                </div>
+            </header>
+
+            <div class="sidebar-content">
+                <div class="upload-state" id="upload-panel">
+                    <div class="brand-hero">
+                        <h2>Obsidian</h2>
+                        <span>What's App Viewer</span>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label>Display Name</label>
+                        <input type="text" id="display-name" placeholder="Exact name in chat (e.g. Paras)">
+                    </div>
+
+                    <div class="drop-target" id="drop-target">
+                        <i class="ph ph-file-arrow-up"></i>
+                        <p>Drop <strong>.txt</strong> or <strong>.zip</strong></p>
+                        <input type="file" id="file-input" accept=".txt,.zip" hidden>
+                        <button class="btn-secondary" onclick="document.getElementById('file-input').click()">Browse</button>
+                    </div>
+
+                    <button class="btn-primary" onclick="initViewer()">Load Chat</button>
+                    
+                    <div class="privacy-pill">
+                        <i class="ph-fill ph-shield-check"></i> Processed 100% Locally
+                    </div>
+                </div>
+
+                <div class="chat-list hidden" id="chat-list-panel">
+                    <div class="search-bar-sidebar">
+                        <i class="ph ph-magnifying-glass"></i>
+                        <input type="text" placeholder="Search chats" disabled>
+                    </div>
+                    <div class="chat-item active">
+                        <div class="chat-item-avatar"></div>
+                        <div class="chat-item-info">
+                            <h4 id="sidebar-title">Chat History</h4>
+                            <span id="sidebar-sub">Active now</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <p>Created by <a href="https://parassharma.com" target="_blank">Paras Sharma</a></p>
+            </div>
+
+            <div class="drawer" id="profile-drawer">
+                <div class="drawer-header">
+                    <button onclick="closeDrawer('profile')"><i class="ph ph-arrow-left"></i></button>
+                    <h3>Profile</h3>
+                </div>
+                <div class="drawer-scroll">
+                    <div class="profile-hero">
+                        <div class="large-avatar" onclick="document.getElementById('pfp-upload').click()">
+                            <img src="https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png" id="drawer-pfp-img">
+                            <div class="overlay"><i class="ph ph-camera"></i></div>
+                        </div>
+                        <input type="file" id="pfp-upload" hidden accept="image/*">
+                        <h2>Paras Sharma</h2>
+                        <p>Human before all else.</p>
+                    </div>
+
+                    <div class="section-label">SUPPORT DEVELOPMENT</div>
+                    <div class="support-card">
+                        <p class="support-text">If you like this tool, consider buying me a coffee! ☕</p>
+                        <div class="upi-display">
+                            <span>paras2326@fam</span>
+                            <button onclick="copyUPI()"><i class="ph ph-copy"></i></button>
+                        </div>
+                        <div class="qr-frame">
+                            <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=upi://pay?pa=paras2326@fam&pn=Paras%20Sharma&cu=INR" alt="UPI QR">
+                        </div>
+                        <p class="secure-badge"><i class="ph-fill ph-shield-check"></i> Verified UPI</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="drawer" id="stats-drawer">
+                <div class="drawer-header">
+                    <button onclick="closeDrawer('stats')"><i class="ph ph-arrow-left"></i></button>
+                    <h3>Analytics</h3>
+                </div>
+                <div class="drawer-scroll">
+                    <div class="stats-overview">
+                        <div class="stat-box">
+                            <span class="val" id="stat-total">0</span>
+                            <span class="label">Messages</span>
+                        </div>
+                        <div class="stat-box">
+                            <span class="val" id="stat-media">0</span>
+                            <span class="label">Media</span>
+                        </div>
+                    </div>
+                    
+                    <div class="section-label">ACTIVITY BREAKDOWN</div>
+                    <div class="stats-list" id="stats-list"></div>
+                </div>
+            </div>
+
+            <div class="drawer" id="info-drawer">
+                <div class="drawer-header">
+                    <button onclick="closeDrawer('info')"><i class="ph ph-arrow-left"></i></button>
+                    <h3>App Info</h3>
+                </div>
+                <div class="drawer-scroll">
+                    <div class="info-block">
+                        <h4>About Obsidian</h4>
+                        <p>Obsidian is a privacy-first WhatsApp chat viewer. It transforms exported <code class="inline-code">.txt</code> and <code class="inline-code">.zip</code> files into a beautiful, searchable, and responsive interface.</p>
+                    </div>
+
+                    <div class="info-block">
+                        <h4>Capabilities</h4>
+                        <ul class="feature-list">
+                            <li><i class="ph-fill ph-check-circle"></i> <strong>Client-side Parsing:</strong> Reads .txt and .zip exports instantly.</li>
+                            <li><i class="ph-fill ph-check-circle"></i> <strong>Search:</strong> Real-time message search with highlighting.</li>
+                            <li><i class="ph-fill ph-check-circle"></i> <strong>Analytics:</strong> View message counts and top senders.</li>
+                            <li><i class="ph-fill ph-check-circle"></i> <strong>Theming:</strong> Toggle between Dark and Light modes.</li>
+                        </ul>
+                    </div>
+
+                    <div class="info-block">
+                        <h4>Limitations</h4>
+                        <ul class="feature-list warning">
+                            <li><i class="ph-fill ph-warning-circle"></i> <strong>Media:</strong> Images and videos cannot be displayed directly from the text file. They are marked as "Media omitted".</li>
+                            <li><i class="ph-fill ph-warning-circle"></i> <strong>Voice Notes:</strong> Audio playback is not currently supported.</li>
+                        </ul>
+                    </div>
+
+                    <div class="info-block">
+                        <h4>How it Works</h4>
+                        <p>This tool uses the <strong>File Reader API</strong> to process your chat export entirely within your browser memory. No data is ever uploaded to a server.</p>
+                    </div>
+
+                    <div class="section-label">SOURCE AVAILABLE</div>
+                    <a href="https://github.com/parassharma2306/obsidian" target="_blank" class="repo-card">
+                        <i class="ph-fill ph-github-logo"></i>
+                        <div>
+                            <strong>View on GitHub</strong>
+                            <span>Star the repository</span>
+                        </div>
+                        <i class="ph ph-arrow-square-out"></i>
+                    </a>
+                </div>
+            </div>
+
+        </aside>
+
+        <main class="chat-interface">
+            <div class="chat-bg"></div>
+            
+            <header class="chat-header">
+                <button class="mobile-menu" onclick="toggleSidebar()"><i class="ph ph-list"></i></button>
+                <div class="header-profile">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png" class="header-pfp">
+                    <div class="header-info">
+                        <h3 id="header-name">Welcome</h3>
+                        <p id="header-meta">Obsidian</p>
+                    </div>
+                </div>
+                <div class="header-tools">
+                    <button onclick="toggleSearch()"><i class="ph ph-magnifying-glass"></i></button>
+                    <button><i class="ph ph-dots-three-vertical"></i></button>
+                </div>
+            </header>
+
+            <div class="search-toolbar" id="search-toolbar">
+                <div class="search-input-group">
+                    <button onclick="toggleSearch()"><i class="ph ph-arrow-left"></i></button>
+                    <input type="text" id="live-search" placeholder="Search messages..." oninput="handleSearch(this.value)">
+                </div>
+                <div class="search-nav">
+                    <span id="search-counter"></span>
+                    <button onclick="navSearch('up')"><i class="ph ph-caret-up"></i></button>
+                    <button onclick="navSearch('down')"><i class="ph ph-caret-down"></i></button>
+                </div>
+            </div>
+
+            <div class="messages-viewport" id="viewport">
+                <div class="empty-placeholder" id="empty-state">
+                    <div class="illustration">
+                        <i class="ph-duotone ph-chat-teardrop-text"></i>
+                    </div>
+                    <h1>Obsidian</h1>
+                    <p>Load a chat file to view history, stats, and more.<br>Secure. Fast. Mobile-Ready.</p>
+                </div>
+                
+                <div class="message-list" id="message-list"></div>
+            </div>
+
+            <footer class="chat-footer">
+                <button><i class="ph ph-smiley"></i></button>
+                <button><i class="ph ph-plus"></i></button>
+                <div class="fake-input">Type a message</div>
+                <button><i class="ph ph-microphone"></i></button>
+            </footer>
+        </main>
+        
+        <div id="toast">Copied to Clipboard</div>
+    </div>
+</body>
+</html>
