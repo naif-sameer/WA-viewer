@@ -1,381 +1,797 @@
 // Constants
-const BATCH_SIZE = 50; 
+const BATCH_SIZE = 50;
 const COLORS = ['#e542a3', '#1f7aec', '#d44638', '#2ecc71', '#f39c12', '#9b59b6', '#3498db', '#1abc9c'];
 
 // State
-let globalMessages = [];    
-let messageOnlyCount = 0;   
-let myName = "";
+let globalMessages = [];
+let messageOnlyCount = 0;
+let myName = '';
 let renderRange = { start: 0, end: 0 };
 let colorMap = {};
 let searchResultsIDs = [];
 let searchPointer = -1;
+let inferredDateOrder = 'DMY';
 
-//UI Selector
-const $ = (id) => {
-    const el = document.getElementById(id);
-    return el;
-};
+// UI selector
+const $ = (id) => document.getElementById(id);
 
-// Initialisation
+// Initialization
 window.onload = () => {
-    // Hide Loader
     const loader = $('loader');
     const bar = document.querySelector('.fill');
-    if (bar) setTimeout(() => bar.style.width = '100%', 100);
+    const sidebar = $('sidebar');
+
+    if (bar) {
+        setTimeout(() => {
+            bar.style.width = '100%';
+        }, 100);
+    }
+
     if (loader) {
         setTimeout(() => {
             loader.style.opacity = '0';
-            setTimeout(() => loader.style.display = 'none', 500);
+            setTimeout(() => {
+                loader.style.display = 'none';
+            }, 500);
         }, 800);
+    }
+
+    if (sidebar && window.innerWidth <= 800) {
+        sidebar.classList.add('active');
     }
 };
 
-// FILE INPUT LISTENER 
+// File input listener
 const fileInputEl = $('file-input');
-if(fileInputEl) {
-    fileInputEl.addEventListener('change', function(e) {
-        if (e.target.files.length > 0) {
-            const fileName = e.target.files[0].name;
-            const dropTarget = $('drop-target');
-            if(dropTarget) {
-                const dropP = dropTarget.querySelector('p');
-                const dropI = dropTarget.querySelector('i');
-                if(dropP) dropP.innerHTML = `<strong>${fileName}</strong><br><span style="font-size:12px;opacity:0.7">Ready</span>`;
-                if(dropI) {
-                    dropI.className = "ph-fill ph-check-circle";
-                    dropI.style.color = "#00a884";
-                }
-                dropTarget.style.borderColor = "#00a884";
-                dropTarget.style.background = "rgba(0, 168, 132, 0.1)";
-            }
+if (fileInputEl) {
+    fileInputEl.addEventListener('change', (e) => {
+        if (!e.target.files || e.target.files.length === 0) return;
+
+        const fileName = e.target.files[0].name;
+        const dropTarget = $('drop-target');
+        if (!dropTarget) return;
+
+        const dropP = dropTarget.querySelector('p');
+        const dropI = dropTarget.querySelector('i');
+
+        if (dropP) {
+            dropP.innerHTML = `<strong>${escapeHtml(fileName)}</strong><br><span style="font-size:12px;opacity:0.7">Ready</span>`;
         }
+
+        if (dropI) {
+            dropI.className = 'ph-fill ph-check-circle';
+            dropI.style.color = '#00a884';
+        }
+
+        dropTarget.style.borderColor = '#00a884';
+        dropTarget.style.background = 'rgba(0, 168, 132, 0.1)';
     });
 }
 
-// Core Process
+// Core process
 async function initViewer() {
     const fileInput = $('file-input');
     const nameInput = $('display-name');
-    
-    if(!fileInput || !fileInput.files.length) return showToast("Please select a file");
-    if(!nameInput || !nameInput.value.trim()) return showToast("Enter your display name");
-    
+
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+        showToast('Please select a file');
+        return;
+    }
+
+    if (!nameInput || !nameInput.value.trim()) {
+        showToast('Enter your display name');
+        return;
+    }
+
     myName = nameInput.value.trim();
-    
-    if(window.innerWidth <= 800) toggleSidebar();
-    
+
+    if (window.innerWidth <= 800) {
+        toggleSidebar();
+    }
+
     const file = fileInput.files[0];
-    let rawText = "";
+    let rawText = '';
 
     try {
-        if(file.name.endsWith('.zip')) {
+        if (file.name.toLowerCase().endsWith('.zip')) {
+            if (typeof JSZip === 'undefined') {
+                throw new Error('Zip support is not available right now. Please refresh and try again.');
+            }
+
             const zip = new JSZip();
             const contents = await zip.loadAsync(file);
-            const chatFile = Object.keys(contents.files).find(n => n.endsWith('.txt') && !n.startsWith('__MACOSX'));
-            if(!chatFile) throw new Error("No .txt file found in ZIP");
-            rawText = await contents.files[chatFile].async("string");
+            const chatFile = Object.keys(contents.files).find(
+                (n) => n.toLowerCase().endsWith('.txt') && !n.startsWith('__MACOSX')
+            );
+
+            if (!chatFile) {
+                throw new Error('No .txt file found in ZIP');
+            }
+
+            rawText = await contents.files[chatFile].async('string');
         } else {
             rawText = await readFile(file);
         }
-        
+
         parseChatData(rawText);
+
+        if (messageOnlyCount === 0) {
+            showToast('No messages could be parsed. Check export format and display name.');
+            return;
+        }
+
         updateUIState(file.name);
-        
-    } catch(e) {
-        showToast("Error: " + e.message);
+    } catch (e) {
+        showToast(`Error: ${e.message}`);
         console.error(e);
     }
 }
 
-function readFile(f) {
-    return new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = e => res(e.target.result);
-        r.readAsText(f);
+function readFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target?.result || '');
+        reader.onerror = () => reject(new Error('Unable to read file'));
+        reader.readAsText(file, 'utf-8');
     });
 }
 
-// Parsing Engine
+// Parsing engine
 function parseChatData(text) {
     globalMessages = [];
     messageOnlyCount = 0;
-    
+    colorMap = {};
+
     const lines = text.split(/\r?\n/);
-    const regex = /^\[?(\d{1,4}[/-]\d{1,2}[/-]\d{1,4},? \d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)\]? (?:- )?([^:]+): (.*)/;
-    
-    let lastDate = "";
+    const regex = /^\[?(\d{1,4}[/-]\d{1,2}[/-]\d{1,4},?\s\d{1,2}:\d{2}(?::\d{2})?(?:\s?[APap][Mm])?)\]?\s(?:-\s)?([^:]+):\s(.*)$/;
+
+    let lastDate = '';
     let mediaCount = 0;
-    let senderStats = {}; 
-    
+    const senderStats = {};
+    let lastMessageRef = null;
+
     lines.forEach((line, idx) => {
-        if(!line.trim()) return;
         const match = line.match(regex);
-        
-        if(match) {
-            const rawTime = match[1];
-            const sender = match[2];
-            let content = match[3];
-            const dateStr = rawTime.split(',')[0];
-            
-            // Date Marker
-            if(dateStr !== lastDate) {
-                globalMessages.push({ type: 'date', content: dateStr, id: 'sys-'+idx });
+
+        if (match) {
+            const rawTime = match[1].trim();
+            const sender = match[2].trim();
+            let content = match[3] || '';
+            const dateStr = extractDatePart(rawTime);
+
+            if (dateStr && dateStr !== lastDate) {
+                globalMessages.push({ type: 'date', content: dateStr, id: `sys-${idx}` });
                 lastDate = dateStr;
             }
-            
-            // Analyze Content
-            if(content.includes('<Media omitted>')) {
-                content = '📷 Media omitted';
-                mediaCount++;
+
+            if (/^<media omitted>$/i.test(content.trim())) {
+                content = '[Media omitted]';
+                mediaCount += 1;
             }
-            
-            // Update Stats
+
             senderStats[sender] = (senderStats[sender] || 0) + 1;
-            messageOnlyCount++;
-            
-            // Store Message
-            globalMessages.push({
+            messageOnlyCount += 1;
+
+            const message = {
                 type: 'msg',
                 id: idx,
-                time: rawTime.match(/\d{1,2}:\d{2}\s?([APap][Mm])?/)?.[0] || rawTime.split(',')[1],
-                sender: sender,
-                content: content,
-                isMe: (sender.toLowerCase() === myName.toLowerCase() || sender === "You")
-            });
+                time: extractTimePart(rawTime),
+                sender,
+                content,
+                isMe: isMeSender(sender)
+            };
+
+            globalMessages.push(message);
+            lastMessageRef = message;
+            return;
+        }
+
+        // Multiline continuation from WhatsApp exports
+        if (lastMessageRef) {
+            lastMessageRef.content += `\n${line}`;
         }
     });
-    
+
+    const dateLabels = globalMessages
+        .filter((entry) => entry.type === 'date')
+        .map((entry) => entry.content);
+    inferredDateOrder = inferDateOrder(dateLabels);
+
     generateStats(senderStats, mediaCount);
-    
-    renderRange = { start: Math.max(0, globalMessages.length - BATCH_SIZE), end: globalMessages.length };
+
+    renderRange = {
+        start: Math.max(0, globalMessages.length - BATCH_SIZE),
+        end: globalMessages.length
+    };
+
     renderChatList();
     scrollToBottom();
 }
 
 // Analytics
 function generateStats(senders, media) {
-    if($('stat-total')) $('stat-total').innerText = messageOnlyCount.toLocaleString();
-    if($('stat-media')) $('stat-media').innerText = media.toLocaleString();
-    
+    const totalEl = $('stat-total');
+    const mediaEl = $('stat-media');
     const list = $('stats-list');
-    if(list) {
-        list.innerHTML = '';
-        const sorted = Object.entries(senders).sort((a,b) => b[1] - a[1]);
-        
-        sorted.forEach(([name, count]) => {
-            const pct = ((count / messageOnlyCount) * 100).toFixed(1);
-            const html = `
-                <div class="stat-row">
-                    <div class="stat-row-header">
-                        <span>${name}</span>
-                        <span>${pct}% (${count})</span>
-                    </div>
-                    <div class="progress-track">
-                        <div class="progress-fill" style="width:${pct}%"></div>
-                    </div>
-                </div>`;
-            list.insertAdjacentHTML('beforeend', html);
-        });
-    }
+
+    if (totalEl) totalEl.innerText = messageOnlyCount.toLocaleString();
+    if (mediaEl) mediaEl.innerText = media.toLocaleString();
+
+    if (!list) return;
+
+    const sorted = Object.entries(senders).sort((a, b) => b[1] - a[1]);
+    const statsHtml = sorted.map(([name, count]) => {
+        const pct = messageOnlyCount > 0 ? ((count / messageOnlyCount) * 100).toFixed(1) : '0.0';
+        return `
+            <div class="stat-row">
+                <div class="stat-header">
+                    <span class="stat-name">${escapeHtml(name)}</span>
+                    <span class="stat-pct">${pct}% (${count})</span>
+                </div>
+                <div class="progress-bg">
+                    <div class="progress-val" style="width:${pct}%"></div>
+                </div>
+            </div>`;
+    }).join('');
+
+    list.innerHTML = statsHtml;
 }
 
 // Rendering
 function renderChatList() {
     const list = $('message-list');
-    if(!list) return;
-    list.innerHTML = '';
-    
+    if (!list) return;
+
     const slice = globalMessages.slice(renderRange.start, renderRange.end);
     let lastSender = null;
-    
-    slice.forEach(item => {
-        if(item.type === 'date') {
-            list.insertAdjacentHTML('beforeend', `<div class="system-msg sticky-date">${item.content}</div>`);
+    const rows = [];
+
+    slice.forEach((item) => {
+        if (item.type === 'date') {
+            rows.push(`<div class="system-msg sticky-date" id="msg-${item.id}">${escapeHtml(item.content)}</div>`);
             lastSender = null;
-        } else {
-            const isFirst = item.sender !== lastSender;
-            const tailClass = isFirst ? (item.isMe ? 'tail-out' : 'tail-in') : '';
-            const rowClass = `msg-row ${item.isMe ? 'sent' : 'received'} ${isFirst ? 'tail' : ''} ${tailClass}`;
-            
-            let nameHtml = (!item.isMe && isFirst) ? `<div class="sender" style="color:${getColor(item.sender)}">${item.sender}</div>` : '';
-            let bodyHtml = formatLinks(item.content);
-            
-            const html = `
-                <div class="${rowClass}" id="msg-${item.id}">
-                    <div class="bubble">
-                        ${nameHtml}
-                        <span class="msg-text">${bodyHtml}</span>
-                        <div class="meta">
-                            <span>${item.time}</span>
-                            ${item.isMe ? '<i class="ph-bold ph-check" style="color:#53bdeb"></i>' : ''}
-                        </div>
-                    </div>
-                </div>`;
-            list.insertAdjacentHTML('beforeend', html);
-            lastSender = item.sender;
+            return;
         }
+
+        const isFirst = item.sender !== lastSender;
+        const tailClass = isFirst ? (item.isMe ? 'tail-out' : 'tail-in') : '';
+        const rowClass = `msg-row ${item.isMe ? 'sent' : 'received'} ${isFirst ? 'tail' : ''} ${tailClass}`;
+        const nameHtml = !item.isMe && isFirst
+            ? `<div class="sender" style="color:${getColor(item.sender)}">${escapeHtml(item.sender)}</div>`
+            : '';
+
+        const bodyHtml = formatMessageContent(item.content);
+        const readTick = item.isMe ? '<i class="ph-bold ph-checks" style="color:#53bdeb"></i>' : '';
+
+        const html = `
+            <div class="${rowClass}" id="msg-${item.id}">
+                <div class="bubble">
+                    ${nameHtml}
+                    <span class="msg-text">${bodyHtml}</span>
+                    <div class="meta">
+                        <span>${escapeHtml(item.time)}</span>
+                        ${readTick}
+                    </div>
+                </div>
+            </div>`;
+
+        rows.push(html);
+        lastSender = item.sender;
     });
+
+    list.innerHTML = rows.join('');
 }
 
-// Lazy Load
+// Lazy load
 const viewport = $('viewport');
-if(viewport) {
+if (viewport) {
     viewport.addEventListener('scroll', (e) => {
-        if(e.target.scrollTop === 0 && renderRange.start > 0) {
-            const oldHeight = e.target.scrollHeight;
+        const el = e.target;
+
+        if (el.scrollTop === 0 && renderRange.start > 0) {
+            const oldHeight = el.scrollHeight;
             renderRange.start = Math.max(0, renderRange.start - BATCH_SIZE);
             renderChatList();
-            const newHeight = e.target.scrollHeight;
-            e.target.scrollTop = newHeight - oldHeight;
+            const newHeight = el.scrollHeight;
+            el.scrollTop = newHeight - oldHeight;
+        }
+
+        if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20 && renderRange.end < globalMessages.length) {
+            renderRange.end = Math.min(globalMessages.length, renderRange.end + BATCH_SIZE);
+            renderChatList();
         }
     });
 }
 
 function scrollToBottom() {
     const v = $('viewport');
-    if(v) v.scrollTop = v.scrollHeight;
+    if (v) v.scrollTop = v.scrollHeight;
 }
 
-// Search Engine
+function jumpToBottom() {
+    closeMenu();
+
+    if (globalMessages.length > 0) {
+        renderRange.start = Math.max(0, globalMessages.length - BATCH_SIZE);
+        renderRange.end = globalMessages.length;
+        renderChatList();
+    }
+
+    requestAnimationFrame(() => {
+        scrollToBottom();
+    });
+}
+
+// Search
 function handleSearch(query) {
-    if(!query || query.length < 2) {
+    const liveSearch = $('live-search');
+    const normalized = (query || '').trim().toLowerCase();
+
+    if (!normalized || normalized.length < 2) {
         searchResultsIDs = [];
-        if($('search-counter')) $('search-counter').innerText = "";
+        searchPointer = -1;
+        if ($('search-counter')) $('search-counter').innerText = '';
+        renderChatList();
         return;
     }
-    
-    query = query.toLowerCase();
-    
+
     searchResultsIDs = globalMessages
-        .filter(m => m.type === 'msg' && m.content.toLowerCase().includes(query))
-        .map(m => m.id);
-        
+        .filter((m) => m.type === 'msg' && m.content.toLowerCase().includes(normalized))
+        .map((m) => m.id);
+
     const count = searchResultsIDs.length;
-    if($('search-counter')) $('search-counter').innerText = count > 0 ? `${count} found` : "No matches";
-    
-    if(count > 0) {
-        searchPointer = count - 1; 
-        jumpToMessage(searchResultsIDs[searchPointer]);
+    if (count === 0) {
+        searchPointer = -1;
+        if ($('search-counter')) $('search-counter').innerText = 'No matches';
+        return;
+    }
+
+    searchPointer = 0;
+    jumpToMessage(searchResultsIDs[searchPointer]);
+
+    if ($('search-counter')) {
+        $('search-counter').innerText = `${searchPointer + 1}/${count}`;
+    }
+
+    if (liveSearch && liveSearch.value !== query) {
+        liveSearch.value = query;
     }
 }
 
 function navSearch(dir) {
-    if(searchResultsIDs.length === 0) return;
-    
-    if(dir === 'up') searchPointer--;
-    else searchPointer++;
-    
-    if(searchPointer < 0) searchPointer = searchResultsIDs.length - 1;
-    if(searchPointer >= searchResultsIDs.length) searchPointer = 0;
-    
+    if (searchResultsIDs.length === 0) return;
+
+    if (dir === 'up') {
+        searchPointer -= 1;
+    } else {
+        searchPointer += 1;
+    }
+
+    if (searchPointer < 0) searchPointer = searchResultsIDs.length - 1;
+    if (searchPointer >= searchResultsIDs.length) searchPointer = 0;
+
     jumpToMessage(searchResultsIDs[searchPointer]);
-    
-    if($('search-counter')) $('search-counter').innerText = `${searchResultsIDs.length - searchPointer}/${searchResultsIDs.length}`;
+
+    if ($('search-counter')) {
+        $('search-counter').innerText = `${searchPointer + 1}/${searchResultsIDs.length}`;
+    }
 }
 
 function jumpToMessage(msgId) {
-    const idx = globalMessages.findIndex(m => m.id === msgId);
-    if(idx === -1) return;
-    
+    const idx = globalMessages.findIndex((m) => m.id === msgId);
+    if (idx === -1) return;
+
     renderRange.start = Math.max(0, idx - 40);
     renderRange.end = Math.min(globalMessages.length, idx + 40);
     renderChatList();
-    
+
     setTimeout(() => {
         const el = document.getElementById(`msg-${msgId}`);
-        if(el) {
-            el.scrollIntoView({ block: 'center', behavior: 'auto' });
-            const txt = el.querySelector('.msg-text');
-            const query = $('live-search').value;
-            const regex = new RegExp(`(${query})`, 'gi');
-            txt.innerHTML = txt.innerText.replace(regex, `<span class="hl focus">$1</span>`);
-        }
+        if (!el) return;
+
+        el.scrollIntoView({ block: 'center', behavior: 'auto' });
+
+        const txt = el.querySelector('.msg-text');
+        const queryInput = $('live-search');
+        const query = (queryInput?.value || '').trim();
+
+        if (!txt || !query) return;
+
+        const regex = new RegExp(`(${escapeRegExp(query)})`, 'gi');
+        txt.innerHTML = txt.innerText.replace(regex, '<span class="hl focus">$1</span>');
     }, 50);
 }
 
-// Utils
-function formatLinks(text) {
-    return text.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" style="color:#53bdeb">$1</a>')
-               .replace(/\*(.*?)\*/g, '<strong>$1</strong>');
+// Utilities
+function formatMessageContent(text) {
+    const escaped = escapeHtml(text || '');
+
+    return escaped
+        .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
+        .replace(/\*(.*?)\*/g, '<strong>$1</strong>');
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function escapeRegExp(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function extractDatePart(rawTime) {
+    return rawTime.match(/^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}/)?.[0] || '';
+}
+
+function extractTimePart(rawTime) {
+    return rawTime.match(/\d{1,2}:\d{2}(?::\d{2})?\s?(?:[APap][Mm])?/)?.[0] || rawTime;
+}
+
+function isMeSender(sender) {
+    return sender.toLowerCase() === myName.toLowerCase() || sender === 'You';
 }
 
 function getColor(name) {
     if (!colorMap[name]) {
         let hash = 0;
-        for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        for (let i = 0; i < name.length; i += 1) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
         colorMap[name] = COLORS[Math.abs(hash) % COLORS.length];
     }
     return colorMap[name];
 }
 
-function updateUIState(filename) {
-    if($('upload-panel')) $('upload-panel').classList.add('hidden');
-    if($('chat-list-panel')) $('chat-list-panel').classList.remove('hidden');
-    if($('empty-state')) $('empty-state').classList.add('hidden');
-    
-    const cleanName = filename.replace(/(_chat\.txt|WhatsApp Chat with |\.\w+$)/g, '');
-    
-    if($('sidebar-title')) $('sidebar-title').innerText = cleanName;
-    if($('header-name')) $('header-name').innerText = cleanName;
-    if($('header-meta')) $('header-meta').innerText = `${messageOnlyCount.toLocaleString()} messages`;
-    if($('sidebar-sub')) $('sidebar-sub').innerText = "Loaded successfully";
+function parseExportDateLabel(label) {
+    return parseLabelWithOrder(label, inferredDateOrder);
 }
 
-// UI Toggles
-function openDrawer(id) { 
-    const d = $(id+'-drawer');
-    if(d) d.classList.add('open'); 
-}
-function closeDrawer(id) { 
-    const d = $(id+'-drawer');
-    if(d) d.classList.remove('open'); 
-}
-function toggleSidebar() { 
-    const s = $('sidebar');
-    if(s) s.classList.toggle('active'); 
-}
-function toggleTheme() { document.body.classList.toggle('light-theme'); }
+function parseLabelWithOrder(label, order) {
+    const rawParts = (label || '').split(/[/-]/).map((part) => part.trim());
+    if (rawParts.length !== 3) return null;
 
-function toggleSearch() { 
-    const bar = $('search-toolbar');
-    if(bar) {
-        bar.classList.toggle('active'); 
-        if(bar.classList.contains('active')) $('live-search').focus();
-        else {
-            $('live-search').value = "";
-            searchResultsIDs = [];
-            if($('search-counter')) $('search-counter').innerText = "";
-            renderRange = { start: Math.max(0, globalMessages.length - BATCH_SIZE), end: globalMessages.length };
-            renderChatList();
-            scrollToBottom();
-        }
+    const [aRaw, bRaw, cRaw] = rawParts;
+    const a = parseInt(aRaw, 10);
+    const b = parseInt(bRaw, 10);
+    const c = parseInt(cRaw, 10);
+    if ([a, b, c].some((n) => Number.isNaN(n))) return null;
+
+    if (order === 'YMD') {
+        if (aRaw.length !== 4) return null;
+        return createDateStrict(normalizeYear(a), b, c);
     }
+    if (order === 'MDY') {
+        return createDateStrict(normalizeYear(c), a, b);
+    }
+    return createDateStrict(normalizeYear(c), b, a);
+}
+
+function normalizeYear(year) {
+    if (year >= 100) return year;
+    return year >= 70 ? year + 1900 : year + 2000;
+}
+
+function createDateStrict(year, month, day) {
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+    const date = new Date(year, month - 1, day);
+    if (
+        date.getFullYear() !== year
+        || date.getMonth() !== month - 1
+        || date.getDate() !== day
+    ) {
+        return null;
+    }
+
+    date.setHours(0, 0, 0, 0);
+    return date;
+}
+
+function inferDateOrder(dateLabels) {
+    const labels = (dateLabels || []).filter(Boolean);
+    if (labels.length === 0) return getTieBreakDateOrder();
+
+    const candidates = ['DMY', 'MDY', 'YMD'];
+    let bestOrder = getTieBreakDateOrder();
+    let bestScore = -Infinity;
+
+    candidates.forEach((order) => {
+        const score = scoreDateOrder(labels, order);
+        if (score > bestScore) {
+            bestScore = score;
+            bestOrder = order;
+        }
+    });
+
+    return bestOrder;
+}
+
+function scoreDateOrder(labels, order) {
+    let valid = 0;
+    let invalid = 0;
+    let monotonic = 0;
+    let prevMs = null;
+
+    labels.forEach((label) => {
+        const date = parseLabelWithOrder(label, order);
+        if (!date) {
+            invalid += 1;
+            return;
+        }
+
+        valid += 1;
+        const ms = date.getTime();
+        if (prevMs !== null) {
+            monotonic += ms >= prevMs ? 1 : -1;
+        }
+        prevMs = ms;
+    });
+
+    return (valid * 4) + (monotonic * 2) - (invalid * 6);
+}
+
+function getTieBreakDateOrder() {
+    const locale = Intl.DateTimeFormat().resolvedOptions().locale || '';
+    return locale.toLowerCase().startsWith('en-us') ? 'MDY' : 'DMY';
+}
+
+function updateUIState(filename) {
+    if ($('upload-panel')) $('upload-panel').classList.add('hidden');
+    if ($('chat-list-panel')) $('chat-list-panel').classList.remove('hidden');
+    if ($('empty-state')) $('empty-state').classList.add('hidden');
+
+    const cleanName = filename.replace(/(_chat\.txt|WhatsApp Chat with |\.\w+$)/g, '').trim() || 'Chat History';
+
+    if ($('sidebar-title')) $('sidebar-title').innerText = cleanName;
+    if ($('header-name')) $('header-name').innerText = cleanName;
+    if ($('header-meta')) $('header-meta').innerText = `${messageOnlyCount.toLocaleString()} messages`;
+    if ($('sidebar-sub')) $('sidebar-sub').innerText = 'Loaded successfully';
+}
+
+// UI toggles
+function openDrawer(id) {
+    const drawer = $(`${id}-drawer`);
+    if (drawer) drawer.classList.add('open');
+}
+
+function closeDrawer(id) {
+    const drawer = $(`${id}-drawer`);
+    if (drawer) drawer.classList.remove('open');
+}
+
+function toggleSidebar() {
+    const sidebar = $('sidebar');
+    if (sidebar) sidebar.classList.toggle('active');
+}
+
+function handleChatSelect() {
+    if (window.innerWidth > 800) return;
+
+    const sidebar = $('sidebar');
+    if (sidebar?.classList.contains('active')) {
+        sidebar.classList.remove('active');
+    }
+}
+
+function toggleTheme() {
+    document.body.classList.toggle('light-theme');
+}
+
+function toggleSearch() {
+    const bar = $('search-toolbar');
+    const input = $('live-search');
+
+    if (!bar) return;
+
+    bar.classList.toggle('active');
+    if (bar.classList.contains('active')) {
+        if (input) input.focus();
+        return;
+    }
+
+    if (input) input.value = '';
+    searchResultsIDs = [];
+    searchPointer = -1;
+
+    if ($('search-counter')) $('search-counter').innerText = '';
+
+    renderRange = {
+        start: Math.max(0, globalMessages.length - BATCH_SIZE),
+        end: globalMessages.length
+    };
+
+    renderChatList();
+    scrollToBottom();
 }
 
 function showToast(msg) {
-    const t = $('toast');
-    if(t) {
-        t.innerText = msg;
-        t.classList.add('show');
-        setTimeout(() => t.classList.remove('show'), 2000);
+    const toast = $('toast');
+    if (!toast) return;
+
+    toast.innerText = msg;
+    toast.classList.add('show');
+
+    setTimeout(() => {
+        toast.classList.remove('show');
+    }, 2000);
+}
+
+async function copyUPI() {
+    try {
+        await navigator.clipboard.writeText('paras2326@fam');
+        showToast('UPI ID copied');
+    } catch (error) {
+        showToast('Could not copy UPI ID');
+        console.error(error);
     }
 }
 
-function copyUPI() {
-    navigator.clipboard.writeText('paras2326@fam');
-    showToast('UPI ID Copied!');
+const pfpInput = $('pfp-upload');
+if (pfpInput) {
+    pfpInput.addEventListener('change', (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        const objectUrl = URL.createObjectURL(file);
+
+        if ($('my-pfp-img')) $('my-pfp-img').src = objectUrl;
+        if ($('drawer-pfp-img')) $('drawer-pfp-img').src = objectUrl;
+
+        const headerPfp = document.querySelector('.header-pfp');
+        if (headerPfp) headerPfp.src = objectUrl;
+    });
 }
 
-const pfpInput = $('pfp-upload');
-if(pfpInput) {
-    pfpInput.addEventListener('change', (e) => {
-        if(e.target.files[0]) {
-            const u = URL.createObjectURL(e.target.files[0]);
-            if($('my-pfp-img')) $('my-pfp-img').src = u;
-            if($('drawer-pfp-img')) $('drawer-pfp-img').src = u;
-            const headerPfp = document.querySelector('.header-pfp');
-            if(headerPfp) headerPfp.src = u;
+function closeMenu() {
+    const menu = $('header-menu');
+    if (!menu) return;
+
+    menu.classList.remove('show');
+    document.removeEventListener('click', closeMenuOutside);
+    document.removeEventListener('keydown', closeMenuOnEscape);
+}
+
+function toggleMenu() {
+    const menu = $('header-menu');
+    if (!menu) return;
+
+    const willOpen = !menu.classList.contains('show');
+    if (!willOpen) {
+        closeMenu();
+        return;
+    }
+
+    menu.classList.add('show');
+    document.addEventListener('click', closeMenuOutside);
+    document.addEventListener('keydown', closeMenuOnEscape);
+}
+
+function closeMenuOutside(e) {
+    const menu = $('header-menu');
+    const button = document.querySelector('.menu-container button');
+
+    if (!menu || !button) return;
+    if (!menu.contains(e.target) && !button.contains(e.target)) {
+        closeMenu();
+    }
+}
+
+function closeMenuOnEscape(e) {
+    if (e.key === 'Escape') {
+        closeMenu();
+    }
+}
+
+function triggerDateJump() {
+    closeMenu();
+
+    const dateInput = $('date-jumper');
+    if (!dateInput) return;
+
+    // Force change event even when selecting the same date again.
+    dateInput.value = '';
+
+    try {
+        if (typeof dateInput.showPicker === 'function') {
+            dateInput.showPicker();
+        } else {
+            dateInput.focus();
+            dateInput.click();
         }
-    });
+    } catch (error) {
+        console.warn('showPicker failed; using manual prompt fallback', error);
+        const manualDate = prompt('Enter date to jump to (YYYY-MM-DD):');
+        if (manualDate) handleDateSelection(manualDate);
+    }
+}
+
+function handleDateSelection(dateVal) {
+    if (!dateVal || globalMessages.length === 0) return;
+
+    const targetDate = new Date(`${dateVal}T00:00:00`);
+    if (Number.isNaN(targetDate.getTime())) {
+        showToast('Invalid date format');
+        return;
+    }
+
+    targetDate.setHours(0, 0, 0, 0);
+
+    const targetMs = targetDate.getTime();
+    let exactIndex = -1;
+    let bestBeforeIndex = -1;
+    let bestBeforeMs = -Infinity;
+    let bestAfterIndex = -1;
+    let bestAfterMs = Infinity;
+
+    for (let i = 0; i < globalMessages.length; i += 1) {
+        const entry = globalMessages[i];
+        if (entry.type !== 'date') continue;
+
+        const parsed = parseExportDateLabel(entry.content);
+        if (!parsed) continue;
+
+        const ms = parsed.getTime();
+        if (ms === targetMs && exactIndex === -1) {
+            exactIndex = i;
+        }
+
+        if (ms <= targetMs && ms > bestBeforeMs) {
+            bestBeforeMs = ms;
+            bestBeforeIndex = i;
+        }
+
+        if (ms >= targetMs && ms < bestAfterMs) {
+            bestAfterMs = ms;
+            bestAfterIndex = i;
+        }
+    }
+
+    // Never jump ahead automatically.
+    const bestIndex = exactIndex !== -1 ? exactIndex : bestBeforeIndex;
+    if (bestIndex === -1) {
+        if (bestAfterIndex !== -1) {
+            showToast('No messages on/before selected date');
+        } else {
+            showToast('No valid date markers found in chat');
+        }
+        return;
+    }
+
+    // Start rendering exactly from the matched date marker so jump lands at day start.
+    renderRange.start = Math.max(0, bestIndex);
+    renderRange.end = Math.min(globalMessages.length, bestIndex + (BATCH_SIZE * 2));
+    renderChatList();
+
+    setTimeout(() => {
+        const firstMessageIndex = findFirstMessageIndexForDate(bestIndex);
+        const targetIndex = firstMessageIndex !== -1 ? firstMessageIndex : bestIndex;
+        const targetId = `msg-${globalMessages[targetIndex].id}`;
+        const el = document.getElementById(targetId);
+
+        if (el) {
+            el.scrollIntoView({ block: 'start', behavior: 'auto' });
+            const jumpDateLabel = globalMessages[bestIndex].content;
+            if (exactIndex !== -1) {
+                showToast(`Jumped to ${jumpDateLabel}`);
+            } else {
+                showToast(`Closest previous date: ${jumpDateLabel}`);
+            }
+        } else {
+            showToast('Date loaded but could not scroll to marker');
+        }
+    }, 60);
+}
+
+function findFirstMessageIndexForDate(dateMarkerIndex) {
+    for (let i = dateMarkerIndex + 1; i < globalMessages.length; i += 1) {
+        const entry = globalMessages[i];
+        if (entry.type === 'date') return -1;
+        if (entry.type === 'msg') return i;
+    }
+    return -1;
 }
