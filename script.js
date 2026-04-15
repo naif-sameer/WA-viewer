@@ -10,6 +10,10 @@ const MEDIA_EXTENSIONS = [
 ];
 const MEDIA_EXT_RE = new RegExp(`\\.(${MEDIA_EXTENSIONS.join('|')})$`, 'i');
 const ATTACH_RE = new RegExp(`^(\\S+\\.(${MEDIA_EXTENSIONS.join('|')}))\\s*(?:\\(file attached\\))?$`, 'i');
+// iOS WhatsApp export format: <attached: filename.ext>
+const ATTACH_IOS_RE = new RegExp(`^<attached:\\s*(\\S+\\.(${MEDIA_EXTENSIONS.join('|')}))>$`, 'i');
+// Invisible Unicode directional/formatting characters added by WhatsApp
+const INVISIBLE_CHARS_RE = /[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g;
 
 // State
 let globalMessages = [];
@@ -185,7 +189,9 @@ async function initViewer() {
                     try {
                         const blob = await zipEntry.async('blob');
                         const baseFilename = name.split('/').pop();
-                        mediaFiles[baseFilename] = URL.createObjectURL(blob);
+                        const mimeType = getMimeType(baseFilename);
+                        const typedBlob = mimeType ? blob.slice(0, blob.size, mimeType) : blob;
+                        mediaFiles[baseFilename] = URL.createObjectURL(typedBlob);
                     } catch (err) {
                         // Skip files that cannot be extracted
                     }
@@ -238,7 +244,8 @@ function parseChatData(text) {
         if (match) {
             const rawTime = match[1].trim();
             const sender = match[2].trim();
-            let content = match[3] || '';
+            // Strip invisible Unicode formatting characters that WhatsApp prepends to content
+            let content = (match[3] || '').replace(INVISIBLE_CHARS_RE, '');
             const dateStr = extractDatePart(rawTime);
 
             if (dateStr && dateStr !== lastDate) {
@@ -251,11 +258,12 @@ function parseChatData(text) {
                 mediaCount += 1;
             }
 
-            // Detect attached file references (e.g. "IMG-20230101-WA0001.jpg (file attached)")
-            // Filename must be a single token (no spaces) to avoid false positives on normal text
+            // Detect attached file references in Android format ("file.opus (file attached)")
+            // or iOS format ("<attached: file.opus>").
+            // Filename must be a single token (no spaces) to avoid false positives on normal text.
             let mediaRef = null;
             let mediaType = null;
-            const attachMatch = content.match(ATTACH_RE);
+            const attachMatch = content.match(ATTACH_RE) || content.match(ATTACH_IOS_RE);
             if (attachMatch) {
                 mediaRef = attachMatch[1].trim();
                 mediaType = detectMediaType(mediaRef);
@@ -517,6 +525,23 @@ function detectMediaType(filename) {
     if (['mp4', 'mov', 'avi', 'mkv', '3gp'].includes(ext)) return 'video';
     if (['mp3', 'ogg', 'opus', 'aac', 'wav', 'm4a'].includes(ext)) return 'audio';
     return 'document';
+}
+
+function getMimeType(filename) {
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    const mimeMap = {
+        jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+        gif: 'image/gif', webp: 'image/webp', heic: 'image/heic',
+        mp4: 'video/mp4', mov: 'video/quicktime', avi: 'video/x-msvideo',
+        mkv: 'video/x-matroska', '3gp': 'video/3gpp',
+        mp3: 'audio/mpeg', ogg: 'audio/ogg', opus: 'audio/ogg; codecs=opus',
+        aac: 'audio/aac', wav: 'audio/wav', m4a: 'audio/mp4',
+        pdf: 'application/pdf',
+        doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    };
+    return mimeMap[ext] || '';
 }
 
 function renderMediaContent(filename, mediaType) {
