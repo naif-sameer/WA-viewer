@@ -1,6 +1,15 @@
 // Constants
 const BATCH_SIZE = 50;
 const COLORS = ['#e542a3', '#1f7aec', '#d44638', '#2ecc71', '#f39c12', '#9b59b6', '#3498db', '#1abc9c'];
+const MACOS_METADATA_PREFIX = '__MACOSX';
+const MEDIA_EXTENSIONS = [
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'heic',
+    'mp4', 'mov', 'avi', 'mkv', '3gp',
+    'mp3', 'ogg', 'opus', 'aac', 'wav', 'm4a',
+    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx',
+];
+const MEDIA_EXT_RE = new RegExp(`\\.(${MEDIA_EXTENSIONS.join('|')})$`, 'i');
+const ATTACH_RE = new RegExp(`^(\\S+\\.(${MEDIA_EXTENSIONS.join('|')}))\\s*(?:\\(file attached\\))?$`, 'i');
 
 // State
 let globalMessages = [];
@@ -12,6 +21,7 @@ let searchResultsIDs = [];
 let searchPointer = -1;
 let inferredDateOrder = 'DMY';
 let profileObjectUrl = '';
+let mediaFiles = {};
 
 // UI selector
 const $ = (id) => document.getElementById(id);
@@ -84,8 +94,15 @@ if (dateSheetInputEl) {
 }
 
 document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && dateSheetEl && !dateSheetEl.hidden) {
-        closeDateSheet();
+    if (event.key === 'Escape') {
+        const lb = document.getElementById('media-lightbox');
+        if (lb && lb.classList.contains('open')) {
+            closeLightbox();
+            return;
+        }
+        if (dateSheetEl && !dateSheetEl.hidden) {
+            closeDateSheet();
+        }
     }
 });
 
@@ -141,6 +158,10 @@ async function initViewer() {
     let rawText = '';
 
     try {
+        // Revoke any previously created object URLs to free memory
+        Object.values(mediaFiles).forEach((url) => URL.revokeObjectURL(url));
+        mediaFiles = {};
+
         if (file.name.toLowerCase().endsWith('.zip')) {
             if (typeof JSZip === 'undefined') {
                 throw new Error('Zip support is not available right now. Please refresh and try again.');
@@ -149,7 +170,7 @@ async function initViewer() {
             const zip = new JSZip();
             const contents = await zip.loadAsync(file);
             const chatFile = Object.keys(contents.files).find(
-                (n) => n.toLowerCase().endsWith('.txt') && !n.startsWith('__MACOSX')
+                (n) => n.toLowerCase().endsWith('.txt') && !n.startsWith(MACOS_METADATA_PREFIX)
             );
 
             if (!chatFile) {
@@ -157,6 +178,19 @@ async function initViewer() {
             }
 
             rawText = await contents.files[chatFile].async('string');
+
+            // Extract media files from the ZIP
+            for (const [name, zipEntry] of Object.entries(contents.files)) {
+                if (!zipEntry.dir && MEDIA_EXT_RE.test(name) && !name.startsWith(MACOS_METADATA_PREFIX)) {
+                    try {
+                        const blob = await zipEntry.async('blob');
+                        const baseFilename = name.split('/').pop();
+                        mediaFiles[baseFilename] = URL.createObjectURL(blob);
+                    } catch (err) {
+                        // Skip files that cannot be extracted
+                    }
+                }
+            }
         } else {
             rawText = await readFile(file);
         }
@@ -217,6 +251,16 @@ function parseChatData(text) {
                 mediaCount += 1;
             }
 
+            // Detect attached file references (e.g. "IMG-20230101-WA0001.jpg (file attached)")
+            // Filename must be a single token (no spaces) to avoid false positives on normal text
+            let mediaRef = null;
+            let mediaType = null;
+            const attachMatch = content.match(ATTACH_RE);
+            if (attachMatch) {
+                mediaRef = attachMatch[1].trim();
+                mediaType = detectMediaType(mediaRef);
+            }
+
             senderStats[sender] = (senderStats[sender] || 0) + 1;
             messageOnlyCount += 1;
 
@@ -226,7 +270,9 @@ function parseChatData(text) {
                 time: extractTimePart(rawTime),
                 sender,
                 content,
-                isMe: isMeSender(sender)
+                isMe: isMeSender(sender),
+                mediaRef,
+                mediaType,
             };
 
             globalMessages.push(message);
@@ -308,18 +354,21 @@ function renderChatList() {
             ? `<div class="sender" style="color:${getColor(item.sender)}">${escapeHtml(item.sender)}</div>`
             : '';
 
-        const bodyHtml = formatMessageContent(item.content);
+        const bodyHtml = item.mediaRef
+            ? renderMediaContent(item.mediaRef, item.mediaType)
+            : formatMessageContent(item.content);
         const readTick = item.isMe ? '<i class="ph-bold ph-checks" style="color:#53bdeb"></i>' : '';
+
+        // For media messages use a block container; for text use the inline span with trailing spacer
+        const contentHtml = item.mediaRef
+            ? `<div class="msg-media-body">${bodyHtml}<div class="meta"><span>${escapeHtml(item.time)}</span>${readTick}</div></div>`
+            : `<span class="msg-text">${bodyHtml}</span><div class="meta"><span>${escapeHtml(item.time)}</span>${readTick}</div>`;
 
         const html = `
             <div class="${rowClass}" id="msg-${item.id}">
-                <div class="bubble">
+                <div class="bubble${item.mediaRef ? ' bubble-media' : ''}">
                     ${nameHtml}
-                    <span class="msg-text">${bodyHtml}</span>
-                    <div class="meta">
-                        <span>${escapeHtml(item.time)}</span>
-                        ${readTick}
-                    </div>
+                    ${contentHtml}
                 </div>
             </div>`;
 
@@ -347,6 +396,17 @@ if (viewport) {
         if (el.scrollTop + el.clientHeight >= el.scrollHeight - 20 && renderRange.end < globalMessages.length) {
             renderRange.end = Math.min(globalMessages.length, renderRange.end + BATCH_SIZE);
             renderChatList();
+        }
+    });
+
+    // Event delegation for image lightbox — avoids inline onclick in dynamic HTML
+    viewport.addEventListener('click', (e) => {
+        const wrap = e.target.closest('.msg-media-wrap');
+        if (!wrap) return;
+        const url = wrap.dataset.lbUrl || '';
+        const name = wrap.dataset.lbName || '';
+        if (url.startsWith('blob:')) {
+            openLightbox(url, name);
         }
     });
 }
@@ -448,6 +508,67 @@ function jumpToMessage(msgId) {
         const regex = new RegExp(`(${escapeRegExp(query)})`, 'gi');
         txt.innerHTML = txt.innerText.replace(regex, '<span class="hl focus">$1</span>');
     }, 50);
+}
+
+// Media helpers
+function detectMediaType(filename) {
+    const ext = (filename.split('.').pop() || '').toLowerCase();
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic'].includes(ext)) return 'image';
+    if (['mp4', 'mov', 'avi', 'mkv', '3gp'].includes(ext)) return 'video';
+    if (['mp3', 'ogg', 'opus', 'aac', 'wav', 'm4a'].includes(ext)) return 'audio';
+    return 'document';
+}
+
+function renderMediaContent(filename, mediaType) {
+    const url = mediaFiles[filename];
+
+    if (!url) {
+        const iconMap = { image: 'ph-image', video: 'ph-film-strip', audio: 'ph-waveform', document: 'ph-file' };
+        const icon = iconMap[mediaType] || 'ph-file';
+        return `<div class="media-placeholder"><i class="ph ${icon}"></i><span>${escapeHtml(filename)}</span></div>`;
+    }
+
+    const safeUrl = escapeHtml(url);
+    const safeName = escapeHtml(filename);
+
+    if (mediaType === 'image') {
+        return `<div class="msg-media-wrap" data-lb-url="${safeUrl}" data-lb-name="${safeName}"><img class="msg-media-img" src="${safeUrl}" alt="${safeName}" loading="lazy"><div class="media-zoom-hint"><i class="ph ph-arrows-out"></i></div></div>`;
+    }
+    if (mediaType === 'video') {
+        return `<video class="msg-media-video" src="${safeUrl}" controls preload="metadata"></video>`;
+    }
+    if (mediaType === 'audio') {
+        return `<audio class="msg-media-audio" src="${safeUrl}" controls preload="metadata"></audio>`;
+    }
+    return `<a class="msg-media-doc" href="${safeUrl}" download="${safeName}" target="_blank" rel="noopener noreferrer"><i class="ph ph-file-arrow-down"></i><span>${safeName}</span></a>`;
+}
+
+function openLightbox(url, name) {
+    // Only accept blob URLs generated by this application
+    if (!url || !url.startsWith('blob:')) return;
+
+    let lb = document.getElementById('media-lightbox');
+    if (!lb) {
+        lb = document.createElement('div');
+        lb.id = 'media-lightbox';
+        lb.className = 'media-lightbox';
+        lb.innerHTML = `
+            <button class="lightbox-close" onclick="closeLightbox()"><i class="ph ph-x"></i></button>
+            <img class="lightbox-img" id="lightbox-img" src="" alt="">
+            <div class="lightbox-caption" id="lightbox-caption"></div>`;
+        lb.addEventListener('click', (e) => { if (e.target === lb) closeLightbox(); });
+        document.body.appendChild(lb);
+    }
+    document.getElementById('lightbox-img').src = url;
+    document.getElementById('lightbox-caption').textContent = name || '';
+    lb.classList.add('open');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox() {
+    const lb = document.getElementById('media-lightbox');
+    if (lb) lb.classList.remove('open');
+    document.body.style.overflow = '';
 }
 
 // Utilities
